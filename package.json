@@ -1,0 +1,14 @@
+{
+  "name": "drivex-mern",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "frontend": "npm start --prefix Frontend",
+    "backend": "npm run dev --prefix Backend",
+    "dev": "concurrently \"npm run frontend\" \"npm run backend\"",
+    "install:all": "npm install && npm install --prefix Frontend && npm install --prefix Backend"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
