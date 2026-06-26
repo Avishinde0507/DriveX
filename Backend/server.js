@@ -3,7 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const helmet = require('helmet');
-const mongoSanitize = require('express-mongo-sanitize');
+const mongoSanitize = require('./middleware/mongoSanitize');
 const connectDB = require('./config/db');
 
 // ─────────────────────────────────────────────────────────────────
@@ -60,7 +60,7 @@ app.use(cors({
   origin: function (origin, callback) {
     // Allow requests with no origin (like mobile apps, postman, curl)
     if (!origin) return callback(null, true);
-    
+
     if (allowedOrigins.indexOf(origin) !== -1 || process.env.NODE_ENV !== 'production') {
       return callback(null, true);
     } else {
@@ -109,7 +109,7 @@ app.get('/', (req, res) => {
 app.get('/health', (req, res) => {
   const mongoose = require('mongoose');
   const dbStatus = mongoose.connection.readyState === 1 ? 'UP' : 'DOWN';
-  
+
   const healthStatus = {
     status: dbStatus === 'UP' ? 'UP' : 'DEGRADED',
     timestamp: new Date().toISOString(),
@@ -134,8 +134,8 @@ app.get('/health', (req, res) => {
 // ─────────────────────────────────────────────────────────────────
 app.use((err, req, res, next) => {
   console.error('Unhandled Error:', err);
-  res.status(500).json({ 
-    success: false, 
+  res.status(500).json({
+    success: false,
     message: err.message || 'Internal Server Error',
     stack: process.env.NODE_ENV === 'production' ? undefined : err.stack
   });
