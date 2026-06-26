@@ -50,6 +50,7 @@ app.use(mongoSanitize());
 // 3. Strict CORS Configuration
 const allowedOrigins = [
   process.env.CLIENT_URL,
+  'https://drivex-react-0507.vercel.app',
   'http://localhost:3000',
   'http://localhost:5173',
   'http://127.0.0.1:3000',
@@ -61,7 +62,9 @@ app.use(cors({
     // Allow requests with no origin (like mobile apps, postman, curl)
     if (!origin) return callback(null, true);
 
-    if (allowedOrigins.indexOf(origin) !== -1 || process.env.NODE_ENV !== 'production') {
+    const isVercel = origin.endsWith('.vercel.app') || /^https:\/\/.*\.vercel\.app$/.test(origin);
+
+    if (allowedOrigins.indexOf(origin) !== -1 || isVercel || process.env.NODE_ENV !== 'production') {
       return callback(null, true);
     } else {
       const msg = `The CORS policy for this site does not allow access from origin: ${origin}`;
