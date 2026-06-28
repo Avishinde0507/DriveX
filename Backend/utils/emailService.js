@@ -1,123 +1,79 @@
-const nodemailer = require('nodemailer');
-const EmailLog = require('../models/EmailLog');
-const dns = require('dns');
+/**
+ * ════════════════════════════════════════════════════════════════
+ *  DriveX Email Service
+ *  ─────────────────────────────────────────────────────────────
+ *  Routing: utils/transporter.js decides between:
+ *    1. Resend HTTP API  (RESEND_API_KEY set)  ← works on Render
+ *    2. Nodemailer SMTP  (SMTP_USER / SMTP_PASS set) ← works locally
+ *
+ *  ⚠️  If emails fail on Render/Railway/Docker, set RESEND_API_KEY.
+ *      SMTP ports 465/587 are BLOCKED by those providers.
+ *      Free plan: https://resend.com  (100 emails/day)
+ * ════════════════════════════════════════════════════════════════
+ */
 
-// Force DNS lookup to prioritize IPv4 over IPv6 globally
-if (typeof dns.setDefaultResultOrder === 'function') {
-  dns.setDefaultResultOrder('ipv4first');
-}
+'use strict';
 
-// Helper to log detailed SMTP connection errors
-const logDetailedSmtpError = (error) => {
-  console.error(`   Message: ${error.message}`);
-  console.error(`   Code: ${error.code || 'N/A'}`);
-  console.error(`   Command: ${error.command || 'N/A'}`);
-  console.error(`   Response: ${error.response || 'N/A'}`);
-  console.error(`   Syscall: ${error.syscall || 'N/A'}`);
-  
-  if (error.code === 'ENOTUNREACH') {
-    console.error('   💡 Root Cause: Network Unreachable (ENOTUNREACH). Nodemailer cannot reach the server. This typically means outbound SMTP ports are blocked or IPv6 routing is failing.');
-  } else if (error.code === 'ETIMEDOUT' || error.message.includes('timeout')) {
-    console.error('   💡 Root Cause: Connection Timeout. Outbound SMTP ports (587 or 465) are likely blocked by your hosting provider (e.g. Render, Railway, Docker, WSL, or VPS).');
-  } else if (error.code === 'EAUTH' || error.message.includes('Invalid login') || error.message.includes('Username and Password not accepted')) {
-    console.error('   💡 Root Cause: Authentication Failure. If using Gmail, you MUST use a 16-character GMAIL APP PASSWORD, NOT your regular account password.');
-  } else if (error.code === 'EDNS' || error.syscall === 'getaddrinfo') {
-    console.error('   💡 Root Cause: DNS resolution failed. Make sure you have active internet connection and can resolve the SMTP hostname.');
-  }
-};
+const nodemailer  = require('nodemailer'); // kept for getTestMessageUrl only
+const EmailLog    = require('../models/EmailLog');
+const { sendMail } = require('./transporter');
 
 // ─────────────────────────────────────────────────────────────────
-// TRANSPORTER SETUP WITH RETRY AND CONNECTION VERIFICATION
+// RETRY LOGIC & LOGGING WRAPPER  (signature identical to before)
 // ─────────────────────────────────────────────────────────────────
-const getTransporter = async () => {
-  const user = process.env.SMTP_USER || process.env.EMAIL_USER;
-  const pass = process.env.SMTP_PASS || process.env.EMAIL_PASS;
-  const host = process.env.SMTP_HOST || 'smtp.gmail.com';
+const sendMailWithRetry = async ({ to, subject, html, logData, consoleMeta, maxRetries = 2 }) => {
+  let attempt    = 0;
+  let success    = false;
+  let providerResponse = '';
+  let errorDetails     = null;
 
-  if (user && pass) {
-    // Port 587 STARTTLS configuration (Primary)
-    const primaryConfig = {
-      host: host,
-      port: parseInt(process.env.SMTP_PORT) || 587,
-      secure: process.env.SMTP_SECURE === 'true',
-      requireTLS: true,
-      auth: { user, pass },
-      tls: {
-        family: 4, // Force IPv4
-        rejectUnauthorized: false
-      },
-      connectionTimeout: 30000,
-      greetingTimeout: 30000,
-      socketTimeout: 30000
-    };
+  console.log('\n═══════════════════════════════════════════');
+  console.log(`📧 [DriveX Notification]`);
+  console.log(`   To      : ${to}`);
+  console.log(`   Subject : ${subject}`);
+  if (consoleMeta) Object.entries(consoleMeta).forEach(([k, v]) => console.log(`   ${k.padEnd(8)}: ${v}`));
+  console.log('═══════════════════════════════════════════\n');
 
-    // Port 465 SSL/TLS configuration (Fallback)
-    const fallbackConfig = {
-      host: host,
-      port: 465,
-      secure: true,
-      auth: { user, pass },
-      tls: {
-        family: 4, // Force IPv4
-        rejectUnauthorized: false
-      },
-      connectionTimeout: 30000,
-      greetingTimeout: 30000,
-      socketTimeout: 30000
-    };
-
-    const configs = [
-      { name: 'Primary (STARTTLS Port 587)', options: primaryConfig },
-      { name: 'Fallback (Implicit SSL Port 465)', options: fallbackConfig }
-    ];
-
-    for (let i = 0; i < configs.length; i++) {
-      const config = configs[i];
-      console.log(`📡 [SMTP Connection Test] Verifying ${config.name} for ${user}...`);
-      try {
-        const transporter = nodemailer.createTransport(config.options);
-        // Perform connection test
-        await transporter.verify();
-        console.log(`✅ [SMTP Connected] Successful verification on ${config.name}`);
-        return transporter;
-      } catch (error) {
-        console.error(`❌ [SMTP Error on ${config.name}]`);
-        logDetailedSmtpError(error);
-
-        if (i === configs.length - 1) {
-          console.error('🚨 [SMTP Connection Failure] Both primary and fallback Gmail SMTP configurations failed.');
-          return null;
-        }
-        console.log('🔄 [SMTP Retry] Attempting fallback configuration (Port 465)...');
+  while (attempt <= maxRetries && !success) {
+    try {
+      const info    = await sendMail({ to, subject, html });
+      providerResponse = info?.messageId || 'sent';
+      success = true;
+    } catch (e) {
+      attempt++;
+      errorDetails = e.message;
+      if (attempt <= maxRetries) {
+        console.warn(`⚠️  [Email] Attempt ${attempt} failed, retrying... (${e.message})`);
+        await new Promise(r => setTimeout(r, 1000 * attempt)); // back-off
+      } else {
+        console.error(`❌ [Email] All ${maxRetries + 1} attempts failed: ${e.message}`);
       }
     }
   }
 
-  // Fallback to Ethereal if no credentials are provided at all
-  console.log('ℹ️ No Gmail SMTP credentials provided. Creating Ethereal test account...');
-  try {
-    const testAccount = await nodemailer.createTestAccount();
-    const testTransporter = nodemailer.createTransport({
-      host: 'smtp.ethereal.email',
-      port: 587,
-      secure: false,
-      auth: { user: testAccount.user, pass: testAccount.pass },
-      tls: { family: 4 },
-      connectionTimeout: 30000,
-      greetingTimeout: 30000,
-      socketTimeout: 30000
-    });
-    await testTransporter.verify();
-    return testTransporter;
-  } catch (err) {
-    console.error('❌ Ethereal SMTP failed:', err.message);
-    return null;
+  // Persist log to DB
+  if (logData && logData.userId) {
+    try {
+      await EmailLog.create({
+        userId: logData.userId,
+        bookingId:   logData.bookingId   || null,
+        complaintId: logData.complaintId || null,
+        refundId:    logData.refundId    || null,
+        type:        logData.type        || 'other',
+        subject,
+        recipientEmail: to,
+        status:      success ? 'sent' : 'failed',
+        mailProviderResponse: providerResponse,
+        retryCount:  Math.max(0, attempt - 1),
+        errorDetails: success ? null : errorDetails,
+      });
+    } catch (dbErr) {
+      console.error('Failed to save EmailLog:', dbErr.message);
+    }
   }
 };
 
-// ─────────────────────────────────────────────────────────────────
-// BASE HTML STYLES
-// ─────────────────────────────────────────────────────────────────
+
 const baseStyles = `
   body { margin:0; padding:0; font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; background:#0d1117; color:#e6edf3; }
   .wrap { max-width:600px; margin:40px auto; background:linear-gradient(135deg,rgba(22,27,34,.95),rgba(13,17,23,.98)); border:1px solid rgba(240,88,12,.25); border-radius:16px; overflow:hidden; box-shadow:0 20px 60px rgba(0,0,0,.7); }
@@ -156,66 +112,8 @@ const baseStyles = `
   .footer a { color:#f0580c; text-decoration:none; }
 `;
 
-// ─────────────────────────────────────────────────────────────────
-// RETRY LOGIC & LOGGING WRAPPER
-// ─────────────────────────────────────────────────────────────────
-const sendMailWithRetry = async ({ to, subject, html, logData, consoleMeta, maxRetries = 2 }) => {
-  const transporter = await getTransporter();
-  let attempt = 0;
-  let success = false;
-  let providerResponse = '';
-  let errorDetails = null;
 
-  console.log('\n═══════════════════════════════════════════');
-  console.log(`📧 [DriveX Notification]`);
-  console.log(`   To      : ${to}`);
-  console.log(`   Subject : ${subject}`);
-  if (consoleMeta) Object.entries(consoleMeta).forEach(([k, v]) => console.log(`   ${k.padEnd(8)}: ${v}`));
-  console.log('═══════════════════════════════════════════\n');
 
-  while (attempt <= maxRetries && !success) {
-    try {
-      if (transporter) {
-        const info = await transporter.sendMail({
-          from: process.env.SMTP_FROM || '"DriveX Support" <noreply@drivex.com>',
-          to, subject, html
-        });
-        providerResponse = info.response || 'Success';
-        success = true;
-        const preview = nodemailer.getTestMessageUrl(info);
-        if (preview) console.log(`   🔗 Preview: ${preview}`);
-      } else {
-        errorDetails = 'No transporter available';
-        break;
-      }
-    } catch (e) {
-      attempt++;
-      errorDetails = e.message;
-      console.error(`Email send error (Attempt ${attempt}):`, e.message);
-    }
-  }
-
-  // Save to DB
-  if (logData && logData.userId) {
-    try {
-      await EmailLog.create({
-        userId: logData.userId,
-        bookingId: logData.bookingId || null,
-        complaintId: logData.complaintId || null,
-        refundId: logData.refundId || null,
-        type: logData.type || 'other',
-        subject: subject,
-        recipientEmail: to,
-        status: success ? 'sent' : 'failed',
-        mailProviderResponse: providerResponse,
-        retryCount: Math.max(0, attempt - 1),
-        errorDetails: success ? null : errorDetails
-      });
-    } catch (dbErr) {
-      console.error('Failed to save EmailLog:', dbErr.message);
-    }
-  }
-};
 
 const statusLabel = (s) => s ? s.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : 'Open';
 const priorityClass = (p) => `priority-${p || 'medium'}`;
@@ -627,40 +525,26 @@ const sendEmail = async ({ to, subject, title, text, otp }) => {
     </html>
   `;
 
+  // Always log OTP to terminal — useful as instant fallback if email is blocked
+  console.log('\n======================================================');
+  console.log(`🔒 [DriveX OTP Service]`);
+  console.log(`✉️  Recipient : ${to}`);
+  console.log(`🔑  OTP Code  : ${otp}`);
+  console.log(`📝  Purpose   : ${title}`);
+  console.log('======================================================\n');
+
   try {
-    const transporter = await getTransporter();
-
-    // Output formatted OTP in terminal for instant testing
-    console.log('\n======================================================');
-    console.log(`🔒 [DriveX Security OTP Service]`);
-    console.log(`✉️  Recipient : ${to}`);
-    console.log(`🔑  OTP Code  : ${otp}`);
-    console.log(`📝  Purpose   : ${title}`);
-    console.log('======================================================\n');
-
-    if (transporter) {
-      const mailOptions = {
-        from: process.env.SMTP_FROM || '"DriveX Support" <noreply@drivex.com>',
-        to,
-        subject,
-        html: htmlContent,
-      };
-
-      const info = await transporter.sendMail(mailOptions);
-      console.log(`✉️ Email sent to ${to}. Message ID: ${info.messageId}`);
-      const previewUrl = nodemailer.getTestMessageUrl(info);
-      if (previewUrl) {
-        console.log(`🔗 Ethereal Preview URL: ${previewUrl}`);
-      }
-      return true;
-    }
-
+    const info = await sendMail({ to, subject, html: htmlContent });
+    console.log(`✅ [OTP Email] Sent to ${to}. ID: ${info?.messageId}`);
     return true;
   } catch (error) {
-    console.error('❌ Error sending email:', error.message);
+    console.error(`❌ [OTP Email] Failed to send to ${to}: ${error.message}`);
+    // Return true anyway — the OTP was already printed to the terminal
+    // so users on localhost can still complete verification.
     return false;
   }
 };
+
 
 const sendActivationConfirmationEmail = async ({ to, name }) => {
   const loginUrl = (process.env.CLIENT_URL || 'http://localhost:5173') + '/login';
@@ -707,19 +591,8 @@ const sendActivationConfirmationEmail = async ({ to, name }) => {
   `;
 
   try {
-    const transporter = await getTransporter();
-    if (transporter) {
-      const mailOptions = {
-        from: process.env.SMTP_FROM || '"DriveX Support" <noreply@drivex.com>',
-        to,
-        subject: 'Your DriveX Account Has Been Successfully Activated',
-        html: htmlContent,
-      };
-
-      const info = await transporter.sendMail(mailOptions);
-      console.log(`✉️ [Activation Confirmation] Email sent successfully to ${to}. Message ID: ${info.messageId}`);
-      return true;
-    }
+    const info = await sendMail({ to, subject: 'Your DriveX Account Has Been Successfully Activated', html: htmlContent });
+    console.log(`✉️ [Activation Confirmation] Email sent successfully to ${to}. Message ID: ${info.messageId}`);
     return true;
   } catch (error) {
     console.error(`❌ [Activation Confirmation Error] Failed to send email to ${to}:`, error.message);
@@ -772,17 +645,8 @@ const sendPasswordResetConfirmationEmail = async ({ to, name }) => {
   `;
 
   try {
-    const transporter = await getTransporter();
-    if (transporter) {
-      const info = await transporter.sendMail({
-        from: process.env.SMTP_FROM || '"DriveX Support" <noreply@drivex.com>',
-        to,
-        subject: 'Your DriveX Password Has Been Updated Successfully',
-        html: htmlContent,
-      });
-      console.log(`✅ [Password Reset Email] Confirmation sent to ${to}. Message ID: ${info.messageId}`);
-      return true;
-    }
+    const info = await sendMail({ to, subject: 'Your DriveX Password Has Been Updated Successfully', html: htmlContent });
+    console.log(`✅ [Password Reset Email] Confirmation sent to ${to}. Message ID: ${info?.messageId}`);
     return true;
   } catch (error) {
     console.error(`❌ [Password Reset Email Error] Failed to send to ${to}:`, error.message);
@@ -839,18 +703,9 @@ const sendEmailVerificationSuccessEmail = async ({ to, name, oldEmail }) => {
   `;
 
   try {
-    const transporter = await getTransporter();
-    if (transporter) {
-      const info = await transporter.sendMail({
-        from: process.env.SMTP_FROM || '"DriveX Support" <noreply@drivex.com>',
-        to,
-        subject: 'Your DriveX Email Has Been Successfully Verified',
-        html
-      });
-      console.log(`✉️ [Email Verified] Sent to ${to}. Message ID: ${info.messageId}`);
-      return true;
-    }
-    return false;
+    const info = await sendMail({ to, subject: 'Your DriveX Email Has Been Successfully Verified', html });
+    console.log(`✉️ [Email Verified] Sent to ${to}. Message ID: ${info?.messageId}`);
+    return true;
   } catch (error) {
     console.error(`❌ [Email Change Email Failed]:`, error.message);
     throw error;
@@ -913,18 +768,9 @@ const sendDashboardPasswordChangeEmail = async ({ to, name }) => {
   `;
 
   try {
-    const transporter = await getTransporter();
-    if (transporter) {
-      const info = await transporter.sendMail({
-        from: process.env.SMTP_FROM || '"DriveX Support" <noreply@drivex.com>',
-        to,
-        subject: 'Your DriveX Password Was Updated Successfully',
-        html
-      });
-      console.log(`✉️ [Dashboard PWD Change] Sent to ${to}. Message ID: ${info.messageId}`);
-      return true;
-    }
-    return false;
+    const info = await sendMail({ to, subject: 'Your DriveX Password Was Updated Successfully', html });
+    console.log(`✉️ [Dashboard PWD Change] Sent to ${to}. Message ID: ${info?.messageId}`);
+    return true;
   } catch (error) {
     console.error(`❌ [Password Change Email Failed]:`, error.message);
     throw error;
@@ -951,4 +797,5 @@ module.exports = {
   sendEmailVerificationSuccessEmail,
   sendDashboardPasswordChangeEmail
 };
+
 
