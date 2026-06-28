@@ -103,8 +103,22 @@ class ResendSender {
   }
 
   async sendMail({ from, to, subject, html, text }) {
+    // Resend requires a verified sender domain.
+    // On free plan: only 'onboarding@resend.dev' works without domain verification.
+    // Using a gmail.com from address will be rejected by Resend's API.
+    const safeFrom =
+      process.env.RESEND_FROM ||
+      'DriveX <onboarding@resend.dev>';
+
+    // Warn if caller tried to use a gmail address (which Resend rejects)
+    if (from && from.includes('@gmail.com')) {
+      console.warn(`⚠️  [Resend] Cannot use Gmail address as sender ("${from}").`);
+      console.warn(`   ↳ Using fallback: ${safeFrom}`);
+      console.warn('   ↳ To send from your own domain, verify it at https://resend.com/domains');
+    }
+
     const { data, error } = await this.client.emails.send({
-      from: from || process.env.RESEND_FROM || 'DriveX <onboarding@resend.dev>',
+      from: safeFrom,
       to:   Array.isArray(to) ? to : [to],
       subject,
       html,
@@ -242,11 +256,11 @@ const sendMail = async ({ from, to, subject, html, text }) => {
   const sender = await getSender();
   if (!sender) throw new Error('No email sender available. Check RESEND_API_KEY or SMTP credentials.');
 
-  const fromAddr =
-    from ||
-    process.env.SMTP_FROM ||
-    process.env.RESEND_FROM ||
-    '"DriveX Support" <noreply@drivex.com>';
+  // For Nodemailer (SMTP), use SMTP_FROM; for Resend, let ResendSender pick its own safe address.
+  const isResend = sender instanceof ResendSender;
+  const fromAddr = isResend
+    ? null  // ResendSender will use RESEND_FROM or onboarding@resend.dev
+    : (from || process.env.SMTP_FROM || '"DriveX Support" <noreply@drivex.com>');
 
   return sender.sendMail({ from: fromAddr, to, subject, html, text });
 };
