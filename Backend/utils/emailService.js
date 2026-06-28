@@ -1,32 +1,118 @@
 const nodemailer = require('nodemailer');
 const EmailLog = require('../models/EmailLog');
+const dns = require('dns');
+
+// Force DNS lookup to prioritize IPv4 over IPv6 globally
+if (typeof dns.setDefaultResultOrder === 'function') {
+  dns.setDefaultResultOrder('ipv4first');
+}
+
+// Helper to log detailed SMTP connection errors
+const logDetailedSmtpError = (error) => {
+  console.error(`   Message: ${error.message}`);
+  console.error(`   Code: ${error.code || 'N/A'}`);
+  console.error(`   Command: ${error.command || 'N/A'}`);
+  console.error(`   Response: ${error.response || 'N/A'}`);
+  console.error(`   Syscall: ${error.syscall || 'N/A'}`);
+  
+  if (error.code === 'ENOTUNREACH') {
+    console.error('   💡 Root Cause: Network Unreachable (ENOTUNREACH). Nodemailer cannot reach the server. This typically means outbound SMTP ports are blocked or IPv6 routing is failing.');
+  } else if (error.code === 'ETIMEDOUT' || error.message.includes('timeout')) {
+    console.error('   💡 Root Cause: Connection Timeout. Outbound SMTP ports (587 or 465) are likely blocked by your hosting provider (e.g. Render, Railway, Docker, WSL, or VPS).');
+  } else if (error.code === 'EAUTH' || error.message.includes('Invalid login') || error.message.includes('Username and Password not accepted')) {
+    console.error('   💡 Root Cause: Authentication Failure. If using Gmail, you MUST use a 16-character GMAIL APP PASSWORD, NOT your regular account password.');
+  } else if (error.code === 'EDNS' || error.syscall === 'getaddrinfo') {
+    console.error('   💡 Root Cause: DNS resolution failed. Make sure you have active internet connection and can resolve the SMTP hostname.');
+  }
+};
 
 // ─────────────────────────────────────────────────────────────────
-// TRANSPORTER SETUP
+// TRANSPORTER SETUP WITH RETRY AND CONNECTION VERIFICATION
 // ─────────────────────────────────────────────────────────────────
 const getTransporter = async () => {
-  if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
-    return nodemailer.createTransport({
-      host: process.env.SMTP_HOST,
+  const user = process.env.SMTP_USER || process.env.EMAIL_USER;
+  const pass = process.env.SMTP_PASS || process.env.EMAIL_PASS;
+  const host = process.env.SMTP_HOST || 'smtp.gmail.com';
+
+  if (user && pass) {
+    // Port 587 STARTTLS configuration (Primary)
+    const primaryConfig = {
+      host: host,
       port: parseInt(process.env.SMTP_PORT) || 587,
       secure: process.env.SMTP_SECURE === 'true',
-      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-      tls: { rejectUnauthorized: false },
-      connectionTimeout: 6000,
-      greetingTimeout: 6000,
-      socketTimeout: 10000
-    });
+      requireTLS: true,
+      auth: { user, pass },
+      tls: {
+        family: 4, // Force IPv4
+        rejectUnauthorized: false
+      },
+      connectionTimeout: 30000,
+      greetingTimeout: 30000,
+      socketTimeout: 30000
+    };
+
+    // Port 465 SSL/TLS configuration (Fallback)
+    const fallbackConfig = {
+      host: host,
+      port: 465,
+      secure: true,
+      auth: { user, pass },
+      tls: {
+        family: 4, // Force IPv4
+        rejectUnauthorized: false
+      },
+      connectionTimeout: 30000,
+      greetingTimeout: 30000,
+      socketTimeout: 30000
+    };
+
+    const configs = [
+      { name: 'Primary (STARTTLS Port 587)', options: primaryConfig },
+      { name: 'Fallback (Implicit SSL Port 465)', options: fallbackConfig }
+    ];
+
+    for (let i = 0; i < configs.length; i++) {
+      const config = configs[i];
+      console.log(`📡 [SMTP Connection Test] Verifying ${config.name} for ${user}...`);
+      try {
+        const transporter = nodemailer.createTransport(config.options);
+        // Perform connection test
+        await transporter.verify();
+        console.log(`✅ [SMTP Connected] Successful verification on ${config.name}`);
+        return transporter;
+      } catch (error) {
+        console.error(`❌ [SMTP Error on ${config.name}]`);
+        logDetailedSmtpError(error);
+
+        if (i === configs.length - 1) {
+          console.error('🚨 [SMTP Connection Failure] Both primary and fallback Gmail SMTP configurations failed.');
+          return null;
+        }
+        console.log('🔄 [SMTP Retry] Attempting fallback configuration (Port 465)...');
+      }
+    }
   }
+
+  // Fallback to Ethereal if no credentials are provided at all
+  console.log('ℹ️ No Gmail SMTP credentials provided. Creating Ethereal test account...');
   try {
     const testAccount = await nodemailer.createTestAccount();
-    return nodemailer.createTransport({
-      host: 'smtp.ethereal.email', port: 587, secure: false,
+    const testTransporter = nodemailer.createTransport({
+      host: 'smtp.ethereal.email',
+      port: 587,
+      secure: false,
       auth: { user: testAccount.user, pass: testAccount.pass },
-      connectionTimeout: 6000,
-      greetingTimeout: 6000,
-      socketTimeout: 10000
+      tls: { family: 4 },
+      connectionTimeout: 30000,
+      greetingTimeout: 30000,
+      socketTimeout: 30000
     });
-  } catch { return null; }
+    await testTransporter.verify();
+    return testTransporter;
+  } catch (err) {
+    console.error('❌ Ethereal SMTP failed:', err.message);
+    return null;
+  }
 };
 
 // ─────────────────────────────────────────────────────────────────
@@ -704,6 +790,147 @@ const sendPasswordResetConfirmationEmail = async ({ to, name }) => {
   }
 };
 
+const sendEmailVerificationSuccessEmail = async ({ to, name, oldEmail }) => {
+  const loginUrl = (process.env.CLIENT_URL || 'http://localhost:3000') + '/login';
+  const html = `
+    <!DOCTYPE html><html><head><meta charset="utf-8">
+    <style>
+      body { margin:0; padding:0; font-family:'Inter',-apple-system,sans-serif; background:#0d1117; color:#e6edf3; }
+      .wrap { max-width:600px; margin:40px auto; background:linear-gradient(135deg,rgba(22,27,34,.98),rgba(13,17,23,.98)); border:1px solid rgba(0,206,201,.2); border-radius:16px; overflow:hidden; box-shadow:0 20px 60px rgba(0,0,0,.8); }
+      .hdr { background:linear-gradient(90deg,#1a1f2e,#111827); padding:28px 30px; text-align:center; border-bottom:2px solid #00CEC9; }
+      .logo { font-size:28px; font-weight:800; color:#fff; letter-spacing:1px; }
+      .logo span { color:#00CEC9; }
+      .badge { display:inline-block; margin-top:10px; background:rgba(0,206,201,.12); border:1px solid rgba(0,206,201,.3); color:#00CEC9; font-size:12px; font-weight:700; letter-spacing:2px; text-transform:uppercase; padding:4px 14px; border-radius:20px; }
+      .body { padding:36px 30px; }
+      .title { font-size:22px; font-weight:700; color:#fff; text-align:center; margin-bottom:6px; }
+      .sub { text-align:center; color:#00CEC9; font-size:12px; font-weight:700; letter-spacing:1px; text-transform:uppercase; margin-bottom:24px; }
+      .text { font-size:15px; color:#8b949e; margin-bottom:16px; line-height:1.7; }
+      .info-box { background:rgba(0,206,201,.05); border:1px solid rgba(0,206,201,.15); border-left:3px solid #00CEC9; border-radius:10px; padding:18px 22px; margin:24px 0; }
+      .info-box p { margin:0 0 8px; font-size:14px; color:#8b949e; }
+      .info-box p:last-child { margin:0; }
+      .info-box strong { color:#e6edf3; }
+      .btn-wrap { text-align:center; margin:30px 0; }
+      .btn { display:inline-block; background:linear-gradient(135deg,#00CEC9,#89E900); color:#fff !important; text-decoration:none; font-weight:700; font-size:15px; padding:13px 34px; border-radius:8px; }
+      .notice { font-size:13px; color:#484f58; border-top:1px solid rgba(255,255,255,.05); padding-top:18px; margin-top:24px; }
+      .ftr { background:#090d13; padding:18px; text-align:center; font-size:12px; color:#484f58; border-top:1px solid rgba(0,206,201,.1); }
+    </style></head><body>
+    <div class="wrap">
+      <div class="hdr"><img src="${process.env.FRONTEND_URL || 'http://localhost:3000'}/DriveX-logo.png" alt="DriveX" style="height:80px; display:inline-block; vertical-align:middle;" /><div class="badge">✅ Email Verified</div></div>
+      <div class="body">
+        <h2 class="title">Email Updated Successfully</h2>
+        <p class="sub">Account Security Notification</p>
+        <p class="text">Dear <strong style="color:#e6edf3;">${name}</strong>,</p>
+        <p class="text">Your DriveX account email address has been successfully updated and verified.</p>
+        <div class="info-box">
+          <p>Previous Email: <strong>${oldEmail}</strong></p>
+          <p>New Email: <strong>${to}</strong></p>
+          <p>Status: <strong style="color:#00CEC9;">✓ Verified</strong></p>
+        </div>
+        <p class="text">You can now log in using your new email address.</p>
+        <div class="btn-wrap"><a href="${loginUrl}" class="btn" target="_blank">Access DriveX</a></div>
+        <div class="notice">
+          <p><strong>Security Notice:</strong> If you did not make this change, please contact our support team immediately.</p>
+          <p>Best Regards,<br><strong style="color:#6e7681;">DriveX Security Team</strong></p>
+        </div>
+      </div>
+      <div class="ftr"><p>&copy; ${new Date().getFullYear()} DriveX Vehicle Rental Management. All rights reserved.</p></div>
+    </div>
+    </body></html>
+  `;
+
+  try {
+    const transporter = await getTransporter();
+    if (transporter) {
+      const info = await transporter.sendMail({
+        from: process.env.SMTP_FROM || '"DriveX Support" <noreply@drivex.com>',
+        to,
+        subject: 'Your DriveX Email Has Been Successfully Verified',
+        html
+      });
+      console.log(`✉️ [Email Verified] Sent to ${to}. Message ID: ${info.messageId}`);
+      return true;
+    }
+    return false;
+  } catch (error) {
+    console.error(`❌ [Email Change Email Failed]:`, error.message);
+    throw error;
+  }
+};
+
+const sendDashboardPasswordChangeEmail = async ({ to, name }) => {
+  const loginUrl = (process.env.CLIENT_URL || 'http://localhost:3000') + '/login';
+  const timestamp = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+  const html = `
+    <!DOCTYPE html><html><head><meta charset="utf-8">
+    <style>
+      body { margin:0; padding:0; font-family:'Inter',-apple-system,sans-serif; background:#0d1117; color:#e6edf3; }
+      .wrap { max-width:600px; margin:40px auto; background:linear-gradient(135deg,rgba(22,27,34,.98),rgba(13,17,23,.98)); border:1px solid rgba(240,88,12,.25); border-radius:16px; overflow:hidden; box-shadow:0 20px 60px rgba(0,0,0,.8); }
+      .hdr { background:linear-gradient(90deg,#1a1f2e,#111827); padding:28px 30px; text-align:center; border-bottom:2px solid #f0580c; }
+      .logo { font-size:28px; font-weight:800; color:#fff; letter-spacing:1px; }
+      .logo span { color:#f0580c; }
+      .badge { display:inline-block; margin-top:10px; background:rgba(240,88,12,.12); border:1px solid rgba(240,88,12,.3); color:#f0580c; font-size:12px; font-weight:700; letter-spacing:2px; text-transform:uppercase; padding:4px 14px; border-radius:20px; }
+      .body { padding:36px 30px; }
+      .title { font-size:22px; font-weight:700; color:#fff; text-align:center; margin-bottom:6px; }
+      .sub { text-align:center; color:#f0580c; font-size:12px; font-weight:700; letter-spacing:1px; text-transform:uppercase; margin-bottom:24px; }
+      .text { font-size:15px; color:#8b949e; margin-bottom:16px; line-height:1.7; }
+      .security-box { background:rgba(240,88,12,.05); border:1px solid rgba(240,88,12,.15); border-left:3px solid #f0580c; border-radius:10px; padding:20px 24px; margin:24px 0; }
+      .security-box h4 { margin:0 0 12px; color:#f0580c; font-size:14px; font-weight:700; text-transform:uppercase; letter-spacing:1px; }
+      .security-box ul { padding-left:18px; margin:0; color:#8b949e; font-size:14px; }
+      .security-box li { margin-bottom:7px; }
+      .ts-box { background:rgba(255,255,255,.03); border:1px solid rgba(255,255,255,.07); border-radius:8px; padding:12px 16px; margin:20px 0; font-size:13px; color:#484f58; }
+      .ts-box strong { color:#6e7681; }
+      .btn-wrap { text-align:center; margin:30px 0; }
+      .btn { display:inline-block; background:linear-gradient(135deg,#f0580c,#e84393); color:#fff !important; text-decoration:none; font-weight:700; font-size:15px; padding:13px 34px; border-radius:8px; box-shadow:0 6px 24px rgba(240,88,12,.35); }
+      .notice { font-size:13px; color:#484f58; border-top:1px solid rgba(255,255,255,.05); padding-top:18px; margin-top:24px; }
+      .ftr { background:#090d13; padding:18px; text-align:center; font-size:12px; color:#484f58; border-top:1px solid rgba(240,88,12,.1); }
+    </style></head><body>
+    <div class="wrap">
+      <div class="hdr"><img src="${process.env.FRONTEND_URL || 'http://localhost:3000'}/DriveX-logo.png" alt="DriveX" style="height:80px; display:inline-block; vertical-align:middle;" /><div class="badge">🔒 Security Alert</div></div>
+      <div class="body">
+        <h2 class="title">Password Was Updated</h2>
+        <p class="sub">Account Security Notification</p>
+        <p class="text">Dear <strong style="color:#e6edf3;">${name}</strong>,</p>
+        <p class="text">Your DriveX account password was successfully updated from your dashboard using old password authentication.</p>
+        <div class="security-box">
+          <h4>⚠️ Security Information</h4>
+          <ul>
+            <li>This change was made from the <strong>Manage Profile</strong> section</li>
+            <li>Your old password is <strong>no longer valid</strong></li>
+            <li>Action time: <strong>${timestamp} IST</strong></li>
+            <li>If you did not perform this action, <strong>contact support immediately</strong></li>
+          </ul>
+        </div>
+        <div class="ts-box"><strong>Event:</strong> Dashboard Password Change &nbsp;|&nbsp; <strong>Time:</strong> ${timestamp} IST</div>
+        <div class="btn-wrap"><a href="${loginUrl}" class="btn" target="_blank">🔑 Access DriveX</a></div>
+        <div class="notice">
+          <p>Thank you for keeping your account secure.</p>
+          <p>Best Regards,<br><strong style="color:#6e7681;">DriveX Security Team</strong></p>
+        </div>
+      </div>
+      <div class="ftr"><p>&copy; ${new Date().getFullYear()} DriveX Vehicle Rental Management. All rights reserved.</p><p>This is an automated security notification. Do not reply.</p></div>
+    </div>
+    </body></html>
+  `;
+
+  try {
+    const transporter = await getTransporter();
+    if (transporter) {
+      const info = await transporter.sendMail({
+        from: process.env.SMTP_FROM || '"DriveX Support" <noreply@drivex.com>',
+        to,
+        subject: 'Your DriveX Password Was Updated Successfully',
+        html
+      });
+      console.log(`✉️ [Dashboard PWD Change] Sent to ${to}. Message ID: ${info.messageId}`);
+      return true;
+    }
+    return false;
+  } catch (error) {
+    console.error(`❌ [Password Change Email Failed]:`, error.message);
+    throw error;
+  }
+};
+
 module.exports = {
   sendBookingRequestEmail,
   sendBookingApprovedEmail,
@@ -720,5 +947,8 @@ module.exports = {
   sendRefundUpdateEmail: sendRefundCompletedEmail,
   sendEmail,
   sendActivationConfirmationEmail,
-  sendPasswordResetConfirmationEmail
+  sendPasswordResetConfirmationEmail,
+  sendEmailVerificationSuccessEmail,
+  sendDashboardPasswordChangeEmail
 };
+
