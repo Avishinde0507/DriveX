@@ -34,7 +34,11 @@ const request = async (config) => {
     return response.data;
   } catch (error) {
     const message = error.response?.data?.message || error.message || 'Request failed';
-    throw new Error(message);
+    const err = new Error(message);
+    if (error.response?.data) {
+      err.data = error.response.data;
+    }
+    throw err;
   }
 };
 

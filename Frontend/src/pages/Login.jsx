@@ -71,7 +71,15 @@ export default function Login() {
     } catch (err) {
       // If user is unverified, handle redirection to OTP view
       if (err.message && err.message.includes('not verified')) {
-        showToast(err.message, 'warning');
+        let msg = err.message;
+        const devOtp = err.data?.devOtp;
+        if (devOtp) {
+          msg += ` (Dev OTP: ${devOtp})`;
+          setOtp(devOtp);
+        } else {
+          setOtp('');
+        }
+        showToast(msg, 'warning');
         setVerificationEmail(loginData.email);
         setResendTimer(60);
         setTab('verify-otp');
@@ -125,10 +133,16 @@ export default function Login() {
       });
 
       if (result.success) {
-        showToast(result.message || 'OTP sent to registered email.', 'success');
+        let msg = result.message || 'OTP sent to registered email.';
+        if (result.devOtp) {
+          msg += ` (Dev OTP: ${result.devOtp})`;
+          setOtp(result.devOtp);
+        } else {
+          setOtp('');
+        }
+        showToast(msg, 'success');
         setVerificationEmail(regData.email);
         setResendTimer(60);
-        setOtp('');
         setTab('verify-otp');
       }
     } catch (err) {
@@ -169,7 +183,12 @@ export default function Login() {
     try {
       const result = await authAPI.resendOTP(verificationEmail, reason);
       if (result.success) {
-        showToast('A fresh OTP has been sent to your email address.', 'success');
+        let msg = 'A fresh OTP has been sent to your email address.';
+        if (result.devOtp) {
+          msg += ` (Dev OTP: ${result.devOtp})`;
+          setOtp(result.devOtp);
+        }
+        showToast(msg, 'success');
         setResendTimer(60);
       }
     } catch (err) {
@@ -191,9 +210,15 @@ export default function Login() {
     try {
       const result = await authAPI.forgotPassword(verificationEmail);
       if (result.success) {
-        showToast('Verification code sent successfully!', 'success');
+        let msg = 'Verification code sent successfully!';
+        if (result.devOtp) {
+          msg += ` (Dev OTP: ${result.devOtp})`;
+          setOtp(result.devOtp);
+        } else {
+          setOtp('');
+        }
+        showToast(msg, 'success');
         setResendTimer(60);
-        setOtp('');
         setForgotStep('otp');
       }
     } catch (err) {

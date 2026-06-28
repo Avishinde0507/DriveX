@@ -32,7 +32,7 @@ const registerUser = async (req, res) => {
 
         await userExists.save();
 
-        await sendEmail({
+        const emailSent = await sendEmail({
           to: email,
           subject: 'Verify your DriveX Account',
           title: 'Verify Your Email Address',
@@ -42,9 +42,12 @@ const registerUser = async (req, res) => {
 
         return res.status(200).json({
           success: true,
-          message: 'Registration updated. Verification OTP sent to email.',
+          message: emailSent
+            ? 'Registration updated. Verification OTP sent to email.'
+            : 'Registration updated, but email sending failed. Use the OTP below.',
           email: userExists.email,
-          isVerified: false
+          isVerified: false,
+          ...(!emailSent || process.env.NODE_ENV !== 'production' ? { devOtp: otp } : {})
         });
       }
     }
@@ -63,7 +66,7 @@ const registerUser = async (req, res) => {
     });
 
     if (user) {
-      await sendEmail({
+      const emailSent = await sendEmail({
         to: email,
         subject: 'Verify your DriveX Account',
         title: 'Verify Your Email Address',
@@ -73,9 +76,12 @@ const registerUser = async (req, res) => {
 
       res.status(201).json({
         success: true,
-        message: 'Registration successful! Verification OTP sent to email.',
+        message: emailSent
+          ? 'Registration successful! Verification OTP sent to email.'
+          : 'Registration successful, but email sending failed. Use the OTP below.',
         email: user.email,
-        isVerified: false
+        isVerified: false,
+        ...(!emailSent || process.env.NODE_ENV !== 'production' ? { devOtp: otp } : {})
       });
     } else {
       res.status(400).json({ success: false, message: 'Invalid user data' });
@@ -101,7 +107,7 @@ const loginUser = async (req, res) => {
         user.otpExpires = Date.now() + 10 * 60 * 1000;
         await user.save();
 
-        await sendEmail({
+        const emailSent = await sendEmail({
           to: user.email,
           subject: 'Verify your DriveX Account',
           title: 'Verify Your Email Address',
@@ -113,7 +119,10 @@ const loginUser = async (req, res) => {
           success: false,
           isUnverified: true,
           email: user.email,
-          message: 'Account not verified. A new verification OTP has been sent to your email.'
+          message: emailSent
+            ? 'Account not verified. A new verification OTP has been sent to your email.'
+            : 'Account not verified, and email sending failed. Use the OTP below.',
+          ...(!emailSent || process.env.NODE_ENV !== 'production' ? { devOtp: otp } : {})
         });
       }
 
@@ -216,7 +225,7 @@ const resendOTP = async (req, res) => {
     await user.save();
 
     const isForgot = reason === 'forgot';
-    await sendEmail({
+    const emailSent = await sendEmail({
       to: email,
       subject: isForgot ? 'Reset your DriveX Password' : 'Verify your DriveX Account',
       title: isForgot ? 'Password Reset OTP' : 'Verify Your Email Address',
@@ -226,7 +235,13 @@ const resendOTP = async (req, res) => {
       otp
     });
 
-    res.status(200).json({ success: true, message: 'OTP resent successfully.' });
+    res.status(200).json({
+      success: true,
+      message: emailSent
+        ? 'OTP resent successfully.'
+        : 'OTP generated, but email sending failed. Use the OTP below.',
+      ...(!emailSent || process.env.NODE_ENV !== 'production' ? { devOtp: otp } : {})
+    });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -252,7 +267,7 @@ const forgotPassword = async (req, res) => {
     user.otpExpires = Date.now() + 10 * 60 * 1000;
     await user.save();
 
-    await sendEmail({
+    const emailSent = await sendEmail({
       to: email,
       subject: 'Reset your DriveX Password',
       title: 'Password Reset OTP',
@@ -260,7 +275,13 @@ const forgotPassword = async (req, res) => {
       otp
     });
 
-    res.status(200).json({ success: true, message: 'OTP sent successfully to your registered email.' });
+    res.status(200).json({
+      success: true,
+      message: emailSent
+        ? 'OTP sent successfully to your registered email.'
+        : 'OTP generated, but email sending failed. Use the OTP below.',
+      ...(!emailSent || process.env.NODE_ENV !== 'production' ? { devOtp: otp } : {})
+    });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
