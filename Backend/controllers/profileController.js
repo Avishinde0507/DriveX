@@ -122,12 +122,9 @@ const verifyEmailOTP = async (req, res) => {
     await user.save();
 
     // Send email verification confirmation to new email
-    try {
-      await sendEmailVerificationSuccessEmail({ to: newEmail, name: user.name, oldEmail });
-      console.log(`✅ [Email Change] Confirmation sent to new email ${newEmail}`);
-    } catch (emailErr) {
-      console.error(`❌ [Email Change Email Failed]:`, emailErr.message);
-    }
+    sendEmailVerificationSuccessEmail({ to: newEmail, name: user.name, oldEmail })
+      .then(() => console.log(`✅ [Email Change] Confirmation sent to new email ${newEmail}`))
+      .catch(emailErr => console.error(`❌ [Email Change Email Failed]:`, emailErr.message));
 
     const updatedUser = await User.findById(user._id).select('-password -otp -otpExpires -emailOtp -emailOtpExpiry -pendingEmail');
     res.status(200).json({ success: true, message: 'Email updated and verified successfully!', user: updatedUser });
@@ -179,12 +176,9 @@ const changePassword = async (req, res) => {
     console.log(`🔑 [Dashboard Password Change] Updated successfully for ${user.email}`);
 
     // Send security notification email
-    try {
-      await sendDashboardPasswordChangeEmail({ to: user.email, name: user.name });
-      console.log(`✅ [Password Change Email] Security notification sent to ${user.email}`);
-    } catch (emailErr) {
-      console.error(`❌ [Password Change Email Failed]:`, emailErr.message);
-    }
+    sendDashboardPasswordChangeEmail({ to: user.email, name: user.name })
+      .then(() => console.log(`✅ [Password Change Email] Security notification sent to ${user.email}`))
+      .catch(emailErr => console.error(`❌ [Password Change Email Failed]:`, emailErr.message));
 
     res.status(200).json({ success: true, message: 'Password changed successfully.' });
   } catch (error) {
@@ -206,7 +200,10 @@ const sendEmailVerificationSuccessEmail = async ({ to, name, oldEmail }) => {
       port: parseInt(process.env.SMTP_PORT) || 587,
       secure: process.env.SMTP_SECURE === 'true',
       auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-      tls: { rejectUnauthorized: false }
+      tls: { rejectUnauthorized: false },
+      connectionTimeout: 6000,
+      greetingTimeout: 6000,
+      socketTimeout: 10000
     });
   }
   if (!transporter) return;
@@ -281,7 +278,10 @@ const sendDashboardPasswordChangeEmail = async ({ to, name }) => {
       port: parseInt(process.env.SMTP_PORT) || 587,
       secure: process.env.SMTP_SECURE === 'true',
       auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-      tls: { rejectUnauthorized: false }
+      tls: { rejectUnauthorized: false },
+      connectionTimeout: 6000,
+      greetingTimeout: 6000,
+      socketTimeout: 10000
     });
   }
   if (!transporter) return;

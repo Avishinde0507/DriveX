@@ -178,15 +178,12 @@ const verifyOTP = async (req, res) => {
     await user.save();
 
     // Send confirmation email asynchronously (with robust error handling)
-    try {
-      await sendActivationConfirmationEmail({
-        to: user.email,
-        name: user.name
-      });
-      console.log(`✅ [Activation Email] Sent confirmation successfully to ${user.email}`);
-    } catch (emailError) {
-      console.error(`❌ [Activation Email Failed] Failed to send confirmation to ${user.email}:`, emailError.message);
-    }
+    sendActivationConfirmationEmail({
+      to: user.email,
+      name: user.name
+    })
+      .then(() => console.log(`✅ [Activation Email] Sent confirmation successfully to ${user.email}`))
+      .catch(emailError => console.error(`❌ [Activation Email Failed] Failed to send confirmation to ${user.email}:`, emailError.message));
 
     res.status(200).json({
       success: true,
@@ -338,12 +335,9 @@ const resetPassword = async (req, res) => {
     console.log(`🔑 [Password Reset] Password updated successfully in DB for ${user.email}`);
 
     // Send password reset confirmation email (only fires once after successful DB update)
-    try {
-      await sendPasswordResetConfirmationEmail({ to: user.email, name: user.name });
-      console.log(`✅ [Password Reset Email] Security notification sent to ${user.email}`);
-    } catch (emailError) {
-      console.error(`❌ [Password Reset Email Failed] Could not send notification to ${user.email}:`, emailError.message);
-    }
+    sendPasswordResetConfirmationEmail({ to: user.email, name: user.name })
+      .then(() => console.log(`✅ [Password Reset Email] Security notification sent to ${user.email}`))
+      .catch(emailError => console.error(`❌ [Password Reset Email Failed] Could not send notification to ${user.email}:`, emailError.message));
 
     res.status(200).json({ success: true, message: 'Password has been reset successfully. Please login with your new password.' });
   } catch (error) {

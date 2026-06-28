@@ -11,14 +11,20 @@ const getTransporter = async () => {
       port: parseInt(process.env.SMTP_PORT) || 587,
       secure: process.env.SMTP_SECURE === 'true',
       auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-      tls: { rejectUnauthorized: false }
+      tls: { rejectUnauthorized: false },
+      connectionTimeout: 6000,
+      greetingTimeout: 6000,
+      socketTimeout: 10000
     });
   }
   try {
     const testAccount = await nodemailer.createTestAccount();
     return nodemailer.createTransport({
       host: 'smtp.ethereal.email', port: 587, secure: false,
-      auth: { user: testAccount.user, pass: testAccount.pass }
+      auth: { user: testAccount.user, pass: testAccount.pass },
+      connectionTimeout: 6000,
+      greetingTimeout: 6000,
+      socketTimeout: 10000
     });
   } catch { return null; }
 };
